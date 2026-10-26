@@ -73,10 +73,11 @@
     <div class="separator"></div><p class="section-kicker">03 / Pagamento</p>
     <div class="field"><div class="label">Como prefere pagar?</div><div class="payment-options"><label class="pay-option"><input type="radio" name="pagamento" value="Pix" checked /><span>◈ Pix</span></label><label class="pay-option"><input type="radio" name="pagamento" value="Dinheiro" /><span>▤ Dinheiro</span></label></div></div>
     <div class="field"><label for="momento">Momento do pagamento</label><select name="momento" id="momento"><option value="No embarque">No embarque</option><option value="No desembarque">No desembarque</option></select></div>
-    <div class="fare"><div><div class="small">Valor estimado da corrida</div><div id="valor" class="price">R$ 0,00</div><div class="demo">R$ 3,00 de partida + R$ 1,80/km da corrida; R$ 1,00/km da saída do motorista quando informada.</div></div><div class="icon">↗</div></div>
-    <div id="fare-breakdown" class="note" role="status">Selecione embarque e destino para calcular. Taxa de deslocamento depende do ponto de saída do motorista.</div>
+    <div class="fare"><div><div class="small">Valor estimado da corrida</div><div id="valor" class="price">R$ 0,00</div></div><div class="icon">↗</div></div>
+    <div id="fare-breakdown" class="note" role="status">Selecione embarque e destino para calcular.</div>
     <button type="submit" class="primary">Solicitar agendamento <span aria-hidden="true">→</span></button>
     <p class="fineprint"><strong>Protótipo:</strong> o mapa, a busca e a distância precisam de internet; o GPS pode pedir permissão. GPS e mapa consultam serviços públicos de mapas para buscar rua, bairro e cidade, que podem ser aproximados ou estar indisponíveis. Confira sempre rua, número e ponto de embarque. Valor ilustrativo; não há cobrança neste site.</p>
+    <p class="fineprint">Busca de endereços: dados do OpenStreetMap, via Photon e Nominatim. Confira os pontos no mapa.</p>
    </form>
   </section>
   <section id="tela-reservas" class="section-screen hidden"><h1 class="screen-heading">Minhas reservas</h1><div class="screen-subtitle">Acompanhe as solicitações criadas neste aparelho.</div><div id="minhas-reservas"></div></section>
@@ -154,7 +155,7 @@ let previewMap=null,previewLayers=null;
 const gpsFallbackCenter=[-3.119,-60.022]; // Apenas ponto inicial visual do mapa: Manaus, NÃO localização do usuário.
 function routeText(text){el('rota-status').textContent=text}
 function setAddressStatus(kind,msg){el('status-'+kind).textContent=msg}
-function invalidateRoute(){routeGeneration++;routeCandidates=[];approachKm=null;el('km').value='';el('valor').textContent=BRL.format(0);el('fare-breakdown').textContent='Selecione embarque e destino para calcular. Taxa de deslocamento depende do ponto de saída do motorista.';routeText('Escolha embarque e destino nas sugestões ou no mapa.');el('route-preview').classList.add('hidden');el('route-alternative').classList.add('hidden');if(previewLayers){previewLayers.remove();previewLayers=null;}}
+function invalidateRoute(){routeGeneration++;routeCandidates=[];approachKm=null;el('km').value='';el('valor').textContent=BRL.format(0);el('fare-breakdown').textContent='Selecione embarque e destino para calcular.';el('fare-breakdown').classList.remove('hidden');routeText('Escolha embarque e destino nas sugestões ou no mapa.');el('route-preview').classList.add('hidden');el('route-alternative').classList.add('hidden');if(previewLayers){previewLayers.remove();previewLayers=null;}}
 function formatFeature(feature){const p=feature.properties||{};const first=[p.name, p.housenumber, p.street].filter(Boolean).join(' ');const second=[p.district,p.city,p.state].filter(Boolean).join(', ');return [first,second].filter(Boolean).join(' — ') || 'Ponto selecionado no mapa'}
 function setPoint(kind,latitude,longitude,label){const lat=Number(latitude),lon=Number(longitude);if(!Number.isFinite(lat)||!Number.isFinite(lon))return;
  points[kind]={lat,lon};
@@ -182,7 +183,7 @@ function registerInput(kind){
    setAddressStatus(kind,'Digite pelo menos 3 letras para ver sugestões de endereços.');return;
   }
   setAddressStatus(kind,'Procurando sugestões de endereços…');
-  searchTimers[kind]=setTimeout(()=>searchAddress(kind,{automatic:true,version}),650);
+  searchTimers[kind]=setTimeout(()=>searchAddress(kind,{automatic:true,version}),1100);
  });
  input.addEventListener('keydown',event=>{
   if(event.key==='Enter'){
@@ -194,10 +195,61 @@ function registerInput(kind){
 registerInput('origem');registerInput('destino');
 async function fetchJson(url){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),14000);
  try{const resp=await fetch(url,{signal:controller.signal,headers:{Accept:'application/json'}});if(!resp.ok)throw Error('HTTP '+resp.status);return await resp.json()}finally{clearTimeout(timer)}}
+// A busca automática utiliza apenas Photon. O serviço público pode ficar indisponível.
+// A alternativa Nominatim só é consultada ao tocar em "Buscar endereço":
+// não usar Nominatim para autocompletar, e respeitar o limite de uma consulta por segundo.
+const photonCache=new Map();
+let lastPhotonRequestAt=0,photonQueue=Promise.resolve();
+async function photonLookup(query){
+ const key=query.toLocaleLowerCase('pt-BR').trim();
+ if(photonCache.has(key))return photonCache.get(key);
+ const job=photonQueue.then(async()=>{
+  const wait=Math.max(0,1100-(Date.now()-lastPhotonRequestAt));
+  if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
+  lastPhotonRequestAt=Date.now();
+  return fetchJson(photonUrl(query));
+ });
+ photonQueue=job.catch(()=>{});
+ const data=await job;
+ if(photonCache.size>45)photonCache.clear();
+ photonCache.set(key,data);
+ return data;
+}
 function photonUrl(query){
- // Foca inicialmente Manaus e região próxima: evita resultados de outros estados. Para expandir cobertura, futuramente configurar cidades atendidas.
  const p=new URLSearchParams({q:query,limit:'7',lat:'-3.119',lon:'-60.022',countrycode:'BR',bbox:'-60.45,-3.45,-59.50,-2.65',lang:'pt'});
  return 'https://photon.komoot.io/api/?'+p.toString();
+}
+// Compartilhado com a busca reversa (GPS/mapa), sem exceder uma solicitação por segundo neste aparelho.
+let nominatimQueue=Promise.resolve(),lastNominatimRequestAt=0;
+function nominatimRequest(url){
+ const job=nominatimQueue.then(async()=>{
+  const wait=Math.max(0,1200-(Date.now()-lastNominatimRequestAt));
+  if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
+  lastNominatimRequestAt=Date.now();
+  return fetchJson(url);
+ });
+ nominatimQueue=job.catch(()=>{});
+ return job;
+}
+const manualSearchCache=new Map();
+async function manualNominatimSearch(query){
+ // Casa/número são informados no campo próprio: a API pode não ter número cadastrado.
+ const simple=query.replace(/\b\d{1,5}\b/g,'').replace(/\s{2,}/g,' ').trim();
+ const key=simple.toLocaleLowerCase('pt-BR');
+ if(manualSearchCache.has(key))return manualSearchCache.get(key);
+ const params=new URLSearchParams({q:simple,format:'jsonv2',addressdetails:'1',limit:'7',countrycodes:'br',viewbox:'-60.45,-2.65,-59.50,-3.45',bounded:'1','accept-language':'pt-BR'});
+ const data=await nominatimRequest('https://nominatim.openstreetmap.org/search?'+params.toString());
+ const places=(Array.isArray(data)?data:[]).filter(f=>Number.isFinite(Number(f.lat))&&Number.isFinite(Number(f.lon))).map(f=>({
+  label:f.display_name||formatNominatim(f)||simple,lat:Number(f.lat),lon:Number(f.lon)
+ }));
+ if(manualSearchCache.size>35)manualSearchCache.clear();
+ manualSearchCache.set(key,places);
+ return places;
+}
+function photonFeaturesToPlaces(data){
+ return (data.features||[]).filter(f=>Array.isArray(f.geometry&&f.geometry.coordinates)&&f.geometry.coordinates.length===2)
+ .map(f=>({label:formatFeature(f),lon:Number(f.geometry.coordinates[0]),lat:Number(f.geometry.coordinates[1])}))
+ .filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
 }
 async function searchAddress(kind,opts={}){
  const query=el(kind).value.trim(),automatic=Boolean(opts.automatic);
@@ -207,31 +259,39 @@ async function searchAddress(kind,opts={}){
  const button=el('buscar-'+kind),result=el('resultados-'+kind);
  if(!automatic)button.disabled=true;
  clearAddressResults(kind);setAddressStatus(kind,'Procurando endereços…');
+ let places=[],photonFailed=false,source='Photon';
  try{
-  let data=await fetchJson(photonUrl(query));
-  let features=(data.features||[]).filter(f=>Array.isArray(f.geometry&&f.geometry.coordinates)&&f.geometry.coordinates.length===2);
-  // Número de imóvel pode não existir no mapa: tenta novamente pelo nome da rua.
-  if(!features.length && /\d{1,5}/.test(query)){
-   const street=query.replace(/\b\d{1,5}\b/g,'').replace(/\s{2,}/g,' ').trim();
-   if(street.length>=3){data=await fetchJson(photonUrl(street));features=(data.features||[]).filter(f=>Array.isArray(f.geometry&&f.geometry.coordinates)&&f.geometry.coordinates.length===2);}
+  try{
+   places=photonFeaturesToPlaces(await photonLookup(query));
+   // O número pode não existir no OpenStreetMap: tente apenas a rua.
+   if(!places.length && /\d{1,5}/.test(query)){
+    const street=query.replace(/\b\d{1,5}\b/g,'').replace(/\s{2,}/g,' ').trim();
+    if(street.length>=3)places=photonFeaturesToPlaces(await photonLookup(street));
+   }
+  }catch(e){photonFailed=true;}
+  // A API pública Nominatim não permite autocomplete; fallback apenas no clique manual.
+  if(!automatic&&!places.length){
+   if(version===searchVersions[kind]&&el(kind).value.trim()===query)setAddressStatus(kind,'Buscando em outra fonte de endereços…');
+   try{places=await manualNominatimSearch(query);source='OpenStreetMap';}catch(e){/* mapa permanece disponível */}
   }
   if(version!==searchVersions[kind]||el(kind).value.trim()!==query)return;
-  if(!features.length){
-   setAddressStatus(kind,'Não encontrei sugestões. Experimente nome da rua e bairro, toque em Buscar endereço ou marque no mapa.');return;
+  if(!places.length){
+   setAddressStatus(kind,automatic?(photonFailed?'Sugestões indisponíveis agora. Toque em Buscar endereço para tentar outra fonte ou marque no mapa.':'Nenhuma sugestão ainda. Toque em Buscar endereço para ampliar a busca ou marque no mapa.'):'Não localizei esse endereço na busca. Confira a rua e bairro ou marque o ponto no mapa.');
+   if(!automatic&&photonFailed)showToast('Os serviços de busca não responderam. Você pode marcar no mapa.');
+   return;
   }
-  for(const feature of features){
-   const label=formatFeature(feature),coord=feature.geometry.coordinates;
+  for(const place of places){
+   const {label,lat,lon}=place;
    const b=document.createElement('button');b.type='button';b.className='address-result';b.setAttribute('role','option');
    b.textContent='⌖ '+label;
-   b.addEventListener('click',()=>{++searchVersions[kind];clearTimeout(searchTimers[kind]);setPoint(kind,coord[1],coord[0],label);});
+   b.addEventListener('click',()=>{++searchVersions[kind];clearTimeout(searchTimers[kind]);setPoint(kind,lat,lon,label);});
    result.appendChild(b);
   }
   result.classList.remove('hidden');el(kind).setAttribute('aria-expanded','true');
-  setAddressStatus(kind,'Toque no endereço certo da lista para confirmar o ponto e calcular a corrida.');
+  setAddressStatus(kind,'Selecione o endereço certo para calcular a corrida. Confira bairro e número.');
  }catch(e){
   if(version!==searchVersions[kind]||el(kind).value.trim()!==query)return;
-  setAddressStatus(kind,'Busca temporariamente indisponível. Use Buscar endereço de novo ou Escolher no mapa.');
-  if(!automatic)showToast('Não consegui consultar os endereços. Tente marcar no mapa.');
+  setAddressStatus(kind,'Busca indisponível agora. Use Buscar endereço ou marque o ponto no mapa.');
  }finally{if(!automatic)button.disabled=false;}
 }
 function featureReverseLabel(obj){const f=(obj.features||[])[0];return f?formatFeature(f):null}
@@ -248,17 +308,9 @@ function formatNominatim(data){
 // A consulta de endereço ocorre somente quando o usuário pede GPS ou confirma o mapa.
 // O Nominatim público deve receber no máximo uma consulta por segundo neste protótipo.
 const reverseCache=new Map();
-let reverseQueue=Promise.resolve(),lastReverseRequest=0;
 async function reverseNominatim(lat,lon){
- const job=reverseQueue.then(async()=>{
-  const delay=Math.max(0,1200-(Date.now()-lastReverseRequest));
-  if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
-  lastReverseRequest=Date.now();
-  const url='https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&accept-language=pt-BR&lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
-  return formatNominatim(await fetchJson(url));
- });
- reverseQueue=job.catch(()=>{});
- return job;
+ const url='https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&accept-language=pt-BR&lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon);
+ return formatNominatim(await nominatimRequest(url));
 }
 async function reverseLabel(lat,lon){
  const key=Number(lat).toFixed(5)+','+Number(lon).toFixed(5);
@@ -346,11 +398,13 @@ function updatePrice(){
  if(!valid){el('valor').textContent=BRL.format(0);return;}
  const a=Number.isFinite(approachKm)?approachKm:0;
  el('valor').textContent=BRL.format(fare(k,a));
- const tripPart=BRL.format(k*RATES.perKm),basePart=BRL.format(RATES.base);
+ // Não exibir a fórmula de preço ao passageiro; sinalizar apenas valores incompletos.
  if(Number.isFinite(approachKm)){
-  el('fare-breakdown').textContent=`Partida ${basePart} + corrida ${k.toLocaleString('pt-BR')} km × R$ 1,80 (${tripPart}) + deslocamento ${a.toLocaleString('pt-BR',{maximumFractionDigits:2})} km × R$ 1,00 (${BRL.format(a)}). Distância do motorista baseada na última saída registrada neste aparelho.`;
+  el('fare-breakdown').textContent='';
+  el('fare-breakdown').classList.add('hidden');
  }else{
-  el('fare-breakdown').textContent=`Partida ${basePart} + corrida ${k.toLocaleString('pt-BR')} km × R$ 1,80 (${tripPart}). VALOR PARCIAL: não inclui deslocamento do motorista. Para simular, registre a saída na aba Motorista antes de agendar.`;
+  el('fare-breakdown').textContent='Valor parcial: o deslocamento do motorista até o embarque ainda não está incluído.';
+  el('fare-breakdown').classList.remove('hidden');
  }
 }
 function applyRouteChoice(index){
